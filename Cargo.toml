@@ -1,0 +1,23 @@
+[package]
+name = "ttradiobot"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+serde_json = "1"
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
+futures-util = "0.3"
+symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
+teamtalk = { git = "https://github.com/BlindMaster24/TeamTalkRust", rev = "1f4eb1578b14084becf491285e3482bfbc8c583f", default-features = false, features = ["tls-rustls"] }
+teamtalk-sys = "0.1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
