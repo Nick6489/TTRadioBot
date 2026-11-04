@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use teamtalk::{
-    AudioBlockView, CallbackSink, Client, Event,
+    AudioBlockView, Client, Event,
     types::{ChannelId, SoundDeviceId, UserId},
 };
 struct Process(Child);
@@ -133,7 +133,7 @@ state_file = {state:?}
     .unwrap();
     let mut bot_process = Process(
         Command::new(env!("CARGO_BIN_EXE_ttradiobot"))
-            .arg(config)
+            .arg(&config)
             .stdout(Stdio::inherit())
             .spawn()
             .unwrap(),
@@ -143,7 +143,7 @@ state_file = {state:?}
             .iter()
             .any(|u| u.username == "radio" && u.channel_id.0 > 0)
     });
-    let bot = c.get_user_by_username("radio").unwrap().id;
+    let mut bot = c.get_user_by_username("radio").unwrap().id;
     let http = Http::new();
     assert_eq!(
         request(&c, bot, &format!("u {}/a", http.url)),
@@ -157,21 +157,40 @@ state_file = {state:?}
     )));
     let energy = Arc::new(Mutex::new((0_u64, 0_usize)));
     let collect = energy.clone();
-    let _subscription = c.stream_audio_blocks(
-        bot,
-        teamtalk_sys::StreamType::STREAMTYPE_VOICE as u32,
-        CallbackSink::new(move |b: &AudioBlockView<'_>| {
-            let mut e = collect.lock().unwrap();
-            e.0 += b
-                .data
-                .iter()
-                .map(|s| u64::from(s.unsigned_abs()))
-                .sum::<u64>();
-            e.1 += b.data.len();
-        }),
-    );
+    // Upstream stream_audio_blocks filters by a User payload; AudioBlock events
+    // carry their user only in nSource. Consume explicitly in this test receiver.
+    let _subscription = c.on_event(Event::AudioBlock).subscribe(move |ctx| {
+        if ctx.message().source() != bot.0 {
+            return;
+        }
+        let client = ctx.client();
+        let Some(ptr) =
+            client.acquire_user_audio_block(teamtalk_sys::StreamType::STREAMTYPE_VOICE as u32, bot)
+        else {
+            return;
+        };
+        // SAFETY: acquired from this client, inspected only before exactly one
+        // matching release on this event thread; no slice escapes the callback.
+        unsafe {
+            if let Some(b) = AudioBlockView::from_block(&*ptr) {
+                let mut e = collect.lock().unwrap();
+                e.0 += b
+                    .data
+                    .iter()
+                    .map(|s| u64::from(s.unsigned_abs()))
+                    .sum::<u64>();
+                e.1 += b.data.len();
+            }
+            assert!(client.release_user_audio_block(ptr));
+        }
+    });
     let _ = c.join_channel(ChannelId(1), "");
     until(&c, || c.my_channel_id().0 == 1);
+    assert!(c.enable_audio_block_event(
+        bot,
+        teamtalk_sys::StreamType::STREAMTYPE_VOICE as u32,
+        true
+    ));
     let _ = c.subscribe(
         bot,
         teamtalk::types::Subscriptions::from_raw(teamtalk::types::Subscriptions::VOICE),
@@ -180,12 +199,6 @@ state_file = {state:?}
         c.get_user(bot).is_some_and(|u| u.status_msg == "Test A")
     });
     pump(&c, Duration::from_secs(1));
-    eprintln!(
-        "receive diagnostic user {:?}, stats {:?}, energy {:?}",
-        c.get_user(bot),
-        c.get_user_statistics(bot).map(|s| s.voice_recv),
-        *energy.lock().unwrap()
-    );
     let baseline = {
         let e = *energy.lock().unwrap();
         assert!(e.0 > 0 && e.1 > 0, "received nonzero remote PCM");
@@ -208,6 +221,24 @@ state_file = {state:?}
     let half = *energy.lock().unwrap();
     let ratio = (half.0 as f64 / half.1 as f64) / baseline;
     assert!((0.35..0.65).contains(&ratio), "half-volume ratio: {ratio}");
+    // An administrator with the controller's display nickname has no implicit authority.
+    let outsider = Client::new().unwrap();
+    outsider.connect("127.0.0.1", 19333, 19333, false).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline);
+        if let Some((event, _)) = outsider.poll(20) {
+            if event == Event::ConnectSuccess {
+                let _ = outsider.login("controller", "outsider", "test", "TTRadioBot tests");
+            }
+            if event == Event::MySelfLoggedIn {
+                break;
+            }
+        }
+    }
+    assert!(request(&outsider, bot, "s").starts_with("Not authorized"));
+    assert!(request(&outsider, bot, "i").contains("volume: 50%"));
+    let _ = outsider.disconnect();
     let _ = c.leave_channel();
     pump(&c, Duration::from_millis(300));
     let _ = c.join_channel(ChannelId(1), "");
@@ -244,6 +275,15 @@ state_file = {state:?}
     });
     pump(&c, Duration::from_millis(300));
     assert!(request(&c, bot, "i").contains("title: Test B"));
+    // A channel kick disconnects this bot and triggers login/join recovery.
+    let previous_bot = bot;
+    let _ = c.kick_user(bot, ChannelId(1));
+    until(&c, || {
+        c.get_user_by_username("radio")
+            .is_some_and(|u| u.id != previous_bot && u.status_msg == "Test B")
+    });
+    bot = c.get_user_by_username("radio").unwrap().id;
+    assert!(request(&c, bot, "i").contains("volume: 50%; enabled; actual: Playing"));
     assert!(
         Command::new("kill")
             .arg("-TERM")
@@ -261,7 +301,42 @@ state_file = {state:?}
         assert!(start.elapsed() < Duration::from_secs(3));
         pump(&c, Duration::from_millis(20));
     }
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    assert_eq!(saved["enabled"], true);
+    pump(&c, Duration::from_millis(100));
+    let previous_bot = bot;
+    let mut restarted = Process(
+        Command::new(env!("CARGO_BIN_EXE_ttradiobot"))
+            .arg(&config)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    until(&c, || {
+        c.get_user_by_username("radio")
+            .is_some_and(|u| u.id != previous_bot && u.status_msg == "Test B")
+    });
+    bot = c.get_user_by_username("radio").unwrap().id;
+    assert!(request(&c, bot, "i").contains("volume: 50%; enabled; actual: Playing"));
+    assert!(
+        Command::new("kill")
+            .arg("-INT")
+            .arg(restarted.0.id().to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let start = Instant::now();
+    loop {
+        if let Some(status) = restarted.0.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(3));
+        pump(&c, Duration::from_millis(20));
+    }
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(state).unwrap()).unwrap();
     assert_eq!(saved["enabled"], true);
+
     let _ = c.disconnect();
 }

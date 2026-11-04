@@ -54,27 +54,33 @@ impl Radio {
     fn next_id(&mut self) {
         self.id = if self.id == i32::MAX { 1 } else { self.id + 1 };
     }
-    fn clear(&mut self, c: &Client) {
+    fn clear(&mut self, c: &Client) -> Option<i32> {
         if let Some(w) = self.worker.take() {
             w.stop();
         }
         self.pending = None;
-        self.next_id();
-        native::end(c, self.id);
+        let ended = if self.format.is_some() && c.my_channel_id().0 > 0 {
+            self.next_id();
+            native::end(c, self.id);
+            Some(self.id)
+        } else {
+            None
+        };
         self.next_id();
         self.submitted_samples = 0;
         self.elapsed_ms = 0;
         self.format = None;
         self.title.clear();
         self.status_due = Instant::now();
+        ended
     }
     fn reset(&mut self, c: &Client) {
-        self.clear(c);
+        let _ = self.clear(c);
         self.retry_at = Instant::now();
         self.backoff = 1;
     }
     fn fail(&mut self, c: &Client, max: u64) {
-        self.clear(c);
+        let _ = self.clear(c);
         self.actual = Actual::Retrying;
         self.retry_at = Instant::now() + Duration::from_secs(self.backoff);
         self.backoff = (self.backoff * 2).min(max);
@@ -285,8 +291,11 @@ async fn main() -> Result<()> {
     let mut desired = Desired::load(&cfg.state_file, cfg.default_volume)?;
     teamtalk::init_with_path(&cfg.sdk_library).context("load configured TeamTalk SDK library")?;
     if let (Some(name), Some(key)) = (&cfg.license_name, &cfg.license_key) {
-        teamtalk::set_license(name, key)
-            .map_err(|_| anyhow::anyhow!("SDK license setup failed"))?;
+        ensure!(
+            teamtalk::set_license(name, key)
+                .map_err(|_| anyhow::anyhow!("SDK license setup failed"))?,
+            "SDK rejected license information"
+        );
     }
     let c = Client::new()?;
     tls(&c, &cfg)?;
@@ -454,7 +463,20 @@ async fn main() -> Result<()> {
         }
     }
     tracing::info!("Shutting down");
-    radio.clear(&c);
+    if let Some(ended) = radio.clear(&c) {
+        // Let the replacement session's end marker pass the encoder before
+        // disconnect tears it down. The native queue has already been cleared.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            if let Some((Event::AudioInput, message)) = c.poll(10)
+                && message
+                    .audio_input_progress()
+                    .is_some_and(|p| p.stream_id == ended && p.queue_ms == 0 && p.elapsed_ms == 0)
+            {
+                break;
+            }
+        }
+    }
     let _ = c.disconnect();
     Ok(())
 }

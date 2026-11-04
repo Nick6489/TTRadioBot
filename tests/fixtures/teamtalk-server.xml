@@ -4,5 +4,6 @@
 <users>
 <user><username>radio</username><password>test</password><user-type>1</user-type><user-rights>15990783</user-rights></user>
 <user><username>controller</username><password>test</password><user-type>2</user-type><user-rights>15990783</user-rights></user>
+<user><username>outsider</username><password>test</password><user-type>2</user-type><user-rights>15990783</user-rights></user>
 </users>
 </teamtalk>

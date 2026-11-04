@@ -56,7 +56,22 @@ packages for the direct libraries and let its package manager resolve these
 transitive dependencies. Do not remove libpulse0 merely because its daemon is
 not used. `ldd` must show no missing libraries for your actual SDK build.
 
-See the repository completion report for actual command results. Production
+On 2026-11-04, cargo fmt, the 12 offline tests, clippy with warnings denied,
+and an optimized release build passed. The separate HKC network decode smoke
+test passed. The loopback native integration test passed: received nonzero PCM,
+measured silence at 0 and approximately half amplitude at 50, verified titles,
+empty-channel waiting, grace cancellation, suspension/return, manual stop,
+stream switching, denial of an unlisted administrator using a controller's
+display nickname, recovery after a channel kick, restart restoration, and both
+SIGTERM/SIGINT preserving enabled state.
+
+The v5.19a native library can emit a nonfatal `AudioThread` codec assertion when
+an administrator kicks a transmitting bot: the SDK tears down its encoder while
+an input callback is in flight. The test observed successful reconnect/recovery;
+this is a vendor SDK diagnostic, and a debug SDK build may behave differently.
+Normal shutdown waits for the reset session's end event before disconnecting.
+
+Production
 server TLS interoperability (trusted custom CA, expired certificates, invalid
 chains), remote administration moves/kicks, long-duration playback, and native
 musl SDK runtime must also be checked on the deployment host. The container

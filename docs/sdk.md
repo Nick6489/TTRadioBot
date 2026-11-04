@@ -26,7 +26,8 @@ the injection session and progress events. AudioInputStreamer copies submitted
 frames synchronously into message blocks; the caller may release PCM after the
 call returns. It resamples and converts channels to the channel codec format,
 and rejects an input format change within the same session. The bot starts a
-new session on format changes.
+new session on format changes. `queue.rs` mirrors native CalcSamples rounding,
+so duration credits remain aligned over long sessions.
 
 The SDK queue is finite and insertion can fail. The bot normally keeps about
 100 ms plus one MP3 frame outstanding, tracking cumulative submitted duration
