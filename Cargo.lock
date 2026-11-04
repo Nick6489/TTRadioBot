@@ -1652,7 +1652,6 @@ dependencies = [
 [[package]]
 name = "teamtalk"
 version = "6.0.0"
-source = "git+https://github.com/BlindMaster24/TeamTalkRust?rev=1f4eb1578b14084becf491285e3482bfbc8c583f#1f4eb1578b14084becf491285e3482bfbc8c583f"
 dependencies = [
  "bitflags 2.13.2",
  "rand",

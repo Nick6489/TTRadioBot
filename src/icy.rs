@@ -5,13 +5,13 @@ pub struct Icy<R> {
     interval: Option<usize>,
     remaining: usize,
     pub title: Option<String>,
-    on_title: Box<dyn FnMut(String) + Send>,
+    on_title: Box<dyn FnMut(String) + Send + Sync>,
 }
 impl<R: Read> Icy<R> {
     pub fn new(
         inner: R,
         interval: Option<usize>,
-        on_title: impl FnMut(String) + Send + 'static,
+        on_title: impl FnMut(String) + Send + Sync + 'static,
     ) -> Self {
         Self {
             inner,

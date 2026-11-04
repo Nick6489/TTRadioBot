@@ -12,6 +12,8 @@ pub struct Config {
     pub insecure_tls: bool,
     pub ca_file: Option<String>,
     pub sdk_library: PathBuf,
+    pub license_name: Option<String>,
+    pub license_key: Option<String>,
     pub username: String,
     pub password: String,
     pub nickname: String,
@@ -63,12 +65,25 @@ impl Config {
             "invalid timeout/backoff/grace"
         );
         ensure!(
-            c.controllers.iter().all(|s| !s.trim().is_empty()),
-            "empty controller account"
+            c.controllers
+                .iter()
+                .chain(&c.excluded_listeners)
+                .all(|s| !s.trim().is_empty()),
+            "empty controller/excluded listener account"
         );
         ensure!(
             c.tls || (!c.insecure_tls && c.ca_file.is_none()),
             "TLS settings require tls=true"
+        );
+        ensure!(
+            c.license_name.is_some() == c.license_key.is_some(),
+            "license_name and license_key must both be provided"
+        );
+        ensure!(
+            [&c.username, &c.password, &c.nickname, &c.channel_password]
+                .iter()
+                .all(|s| s.len() < 512 && !s.contains('\0')),
+            "TeamTalk login fields exceed SDK limits or contain NUL"
         );
         Ok(c)
     }

@@ -1,0 +1,29 @@
+# Copy to ~/.config/ttradiobot/config.toml and chmod 600.
+# All paths must be absolute (no ~ or environment expansion).
+host = "teamtalk.example.org"
+tcp_port = 10333
+udp_port = 10333
+tls = true
+# Explicit opt-in only. Never falls back automatically.
+insecure_tls = false
+# Defaults to /etc/ssl/certs/ca-certificates.crt. For self-signed servers,
+# use a PEM file containing the trusted server certificate/custom CA.
+# Read docs/sdk.md: SDK verification checks chains, not DNS hostnames.
+# ca_file = "/home/YOU/.config/ttradiobot/server-ca.pem"
+sdk_library = "/home/YOU/.local/lib/teamtalk/libTeamTalk5.so"
+# If your SDK distribution requires a license, provide both:
+# license_name = "Your license name"
+# license_key = "Your license key"
+username = "radio"
+password = "replace-me"
+nickname = "Radio"
+channel = "/Radio"
+channel_password = ""
+controllers = ["your-authenticated-account"]
+excluded_listeners = ["another-bot-account"]
+channel_commands = false
+default_volume = 100
+grace_seconds = 5
+timeout_seconds = 10
+max_backoff_seconds = 60
+state_file = "/home/YOU/.local/state/ttradiobot/state.json"

@@ -36,6 +36,36 @@ impl Desired {
         ensure!(!s.enabled || s.url.is_some(), "enabled state has no URL");
         Ok(s)
     }
+    /// Commit desired changes before acknowledging or changing active playback.
+    pub fn apply(&mut self, cmd: &crate::command::Command, path: &Path) -> Result<bool> {
+        use crate::command::Command;
+        let mut next = self.clone();
+        let restart = match cmd {
+            Command::Url(url) => {
+                next.url = Some(url.clone());
+                next.enabled = true;
+                true
+            }
+            Command::Stop => {
+                next.enabled = false;
+                true
+            }
+            Command::Play => {
+                ensure!(next.url.is_some(), "No saved URL; use u URL first");
+                next.enabled = true;
+                true
+            }
+            Command::Volume(v) => {
+                next.volume = *v;
+                false
+            }
+            _ => anyhow::bail!("Not a desired-state command"),
+        };
+        next.save(path)
+            .map_err(|_| anyhow::anyhow!("State could not be saved; command was not applied"))?;
+        *self = next;
+        Ok(restart)
+    }
     pub fn save(&self, path: &Path) -> Result<()> {
         let parent = path
             .parent()
@@ -140,5 +170,34 @@ mod tests {
         );
         fs::write(&p, b"bad").unwrap();
         assert!(Desired::load(&p, 100).is_err());
+    }
+}
+
+#[cfg(test)]
+mod command_state_tests {
+    use super::*;
+    use crate::command::Command;
+    #[test]
+    fn manual_stop_restart_and_failed_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("state.json");
+        let mut s = Desired::load(&p, 100).unwrap();
+        assert!(s.apply(&Command::Play, &p).is_err());
+        s.apply(&Command::Url("https://radio.test/live".into()), &p)
+            .unwrap();
+        assert!(s.enabled);
+        s.apply(&Command::Volume(0), &p).unwrap();
+        assert_eq!(s.volume, 0);
+        s.apply(&Command::Stop, &p).unwrap();
+        let restored = Desired::load(&p, 100).unwrap();
+        assert!(!restored.enabled);
+        assert_eq!(restored.url, s.url);
+        let before = s.clone();
+        let bad = dir.path().join("not-a-directory");
+        fs::write(&bad, "x").unwrap();
+        assert!(s.apply(&Command::Play, &bad.join("state")).is_err());
+        assert_eq!(s, before);
+        s.apply(&Command::Play, &p).unwrap();
+        assert!(Desired::load(&p, 100).unwrap().enabled);
     }
 }

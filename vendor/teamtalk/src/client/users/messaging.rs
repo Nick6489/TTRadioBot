@@ -1,0 +1,76 @@
+use super::{
+    ChannelId, Client, CommandId, MessageTarget, SendTextOptions, TT_TEXT_MAX_PAYLOAD, ToTT,
+    UserId, can_issue_logged_in_command, split_text_chunks, text_message_for_target,
+};
+
+impl Client {
+    /// Sends a text message to a target.
+    #[must_use]
+    pub fn send_text<T: Into<MessageTarget>>(&self, target: T, text: &str) -> CommandId {
+        self.send_text_with_options(target, text, SendTextOptions::default())
+    }
+
+    /// Sends a text message to a target using explicit options.
+    #[must_use]
+    pub fn send_text_with_options<T: Into<MessageTarget>>(
+        &self,
+        target: T,
+        text: &str,
+        options: SendTextOptions,
+    ) -> CommandId {
+        if !can_issue_logged_in_command(self.connection_state()) {
+            return CommandId::ZERO;
+        }
+        let target = target.into();
+        let chunks = split_text_chunks(text, TT_TEXT_MAX_PAYLOAD);
+        let total_chunks = chunks.len();
+        let mut last_cmd_id = CommandId::ZERO;
+
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let mut msg = text_message_for_target(target);
+            msg.bMore = i32::from(index + 1 < total_chunks);
+            let tt = chunk.tt();
+            unsafe {
+                let len = tt.len().min(TT_TEXT_MAX_PAYLOAD);
+                std::ptr::copy_nonoverlapping(tt.as_ptr(), msg.szMessage.as_mut_ptr(), len);
+            }
+
+            let mut retries_left = if index == 0 {
+                options.first_chunk_retries
+            } else {
+                0
+            };
+            loop {
+                let cmd_id = CommandId(self.backend().do_text_message(self.ptr.0, &msg));
+                if cmd_id.is_ok() {
+                    last_cmd_id = cmd_id;
+                    break;
+                }
+                if retries_left == 0 {
+                    return cmd_id;
+                }
+                retries_left -= 1;
+            }
+        }
+
+        last_cmd_id
+    }
+
+    /// Sends a text message to a user.
+    #[must_use]
+    pub fn send_to_user(&self, user_id: UserId, text: &str) -> CommandId {
+        self.send_text(MessageTarget::User(user_id), text)
+    }
+
+    /// Sends a text message to a channel.
+    #[must_use]
+    pub fn send_to_channel(&self, channel_id: ChannelId, text: &str) -> CommandId {
+        self.send_text(MessageTarget::Channel(channel_id), text)
+    }
+
+    /// Sends a text message to all users.
+    #[must_use]
+    pub fn send_to_all(&self, text: &str) -> CommandId {
+        self.send_text(MessageTarget::Broadcast, text)
+    }
+}

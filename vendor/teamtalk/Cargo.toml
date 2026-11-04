@@ -1,0 +1,58 @@
+[package]
+name = "teamtalk"
+version = "6.0.0"
+edition = "2024"
+authors = ["BlindMaster24"]
+description = "TeamTalk SDK for Rust"
+license = "MIT"
+repository = "https://github.com/BlindMaster24/TeamTalkRust"
+homepage = "https://github.com/BlindMaster24/TeamTalkRust"
+
+[features]
+default = ["tls-native", "state"]
+dispatch = []
+async = ["dep:futures", "dep:futures-timer"]
+async-tokio = ["async", "dep:tokio"]
+logging = ["dep:tracing"]
+mock = ["dispatch", "dep:serde", "dep:serde_json"]
+offline = []
+scripts = ["dep:mlua"]
+plugins = ["dep:libloading"]
+state = []
+bot = []
+bot-serde = ["bot", "dep:serde", "dep:serde_json"]
+bot-macros = ["bot", "dep:teamtalk-macros"]
+bot-redis = ["bot", "dep:redis"]
+bot-sqlite = ["bot", "dep:rusqlite"]
+tls-native = ["reqwest/native-tls"]
+tls-rustls = ["reqwest/rustls"]
+
+[dependencies]
+teamtalk-sys = { version = "0.1.0" }
+thiserror = "2.0.18"
+rand = "0.10"
+regex = "1.12.3"
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking"] }
+sevenz-rust2 = "0.20.2"
+bitflags = "2.11"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+futures = { version = "0.3", optional = true }
+futures-timer = { version = "3.0", optional = true }
+tokio = { version = "1.52", features = ["rt", "sync", "time", "macros"], optional = true }
+tracing = { version = "0.1.44", optional = true }
+mlua = { version = "0.11.6", features = ["lua54", "vendored"], optional = true }
+libloading = { version = "0.9.0", optional = true }
+redis = { version = "1.2.0", optional = true }
+rusqlite = { version = "0.39", optional = true, features = ["bundled"] }
+teamtalk-macros = { version = "0.1.2", optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = { version = "1.0.149", optional = true }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dev-dependencies]
+insta = "1.47.2"
+pretty_assertions = "1.4.1"
+proptest = "1.11.0"
+rstest = "0.26.1"

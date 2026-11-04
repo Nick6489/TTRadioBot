@@ -2,6 +2,7 @@ mod command;
 mod config;
 mod icy;
 mod native;
+mod queue;
 mod state;
 mod stream;
 
@@ -19,7 +20,7 @@ struct Radio {
     worker: Option<stream::Worker>,
     pending: Option<stream::Pcm>,
     id: i32,
-    submitted_us: u64,
+    submitted_samples: u64,
     elapsed_ms: u32,
     last_progress: Instant,
     format: Option<(u32, usize)>,
@@ -28,6 +29,8 @@ struct Radio {
     actual: Actual,
     title: String,
     status: String,
+    status_command: i32,
+    status_due: Instant,
 }
 impl Radio {
     fn new() -> Self {
@@ -35,7 +38,7 @@ impl Radio {
             worker: None,
             pending: None,
             id: 1,
-            submitted_us: 0,
+            submitted_samples: 0,
             elapsed_ms: 0,
             last_progress: Instant::now(),
             format: None,
@@ -44,6 +47,8 @@ impl Radio {
             actual: Actual::Stopped,
             title: String::new(),
             status: String::new(),
+            status_command: 0,
+            status_due: Instant::now(),
         }
     }
     fn next_id(&mut self) {
@@ -57,10 +62,11 @@ impl Radio {
         self.next_id();
         native::end(c, self.id);
         self.next_id();
-        self.submitted_us = 0;
+        self.submitted_samples = 0;
         self.elapsed_ms = 0;
         self.format = None;
         self.title.clear();
+        self.status_due = Instant::now();
     }
     fn reset(&mut self, c: &Client) {
         self.clear(c);
@@ -113,11 +119,13 @@ impl Radio {
             }
             // Keep at most ~150 ms submitted but not consumed. Consumption events,
             // rather than wall-clock sleeps, replenish this budget.
+            let output_rate = c
+                .my_channel()
+                .and_then(|ch| queue::output_rate(&ch.audio_codec));
             while self.worker.is_some()
-                && self
-                    .submitted_us
-                    .saturating_sub(u64::from(self.elapsed_ms) * 1000)
-                    < 100_000
+                && output_rate.is_some_and(|rate| {
+                    queue::needs_audio(self.submitted_samples, self.elapsed_ms, rate)
+                })
             {
                 let pcm = self
                     .pending
@@ -131,7 +139,7 @@ impl Radio {
                     self.next_id();
                     native::end(c, self.id);
                     self.next_id();
-                    self.submitted_us = 0;
+                    self.submitted_samples = 0;
                     self.elapsed_ms = 0;
                 }
                 self.format = Some(fmt);
@@ -146,8 +154,11 @@ impl Radio {
                     self.pending = Some(pcm);
                     break;
                 }
-                self.submitted_us += pcm.samples.len() as u64 * 1_000_000
-                    / (pcm.channels as u64 * u64::from(pcm.rate));
+                self.submitted_samples += queue::output_frames(
+                    pcm.samples.len() / pcm.channels,
+                    pcm.rate,
+                    output_rate.unwrap(),
+                );
                 pcm.samples.clear();
                 self.actual = Actual::Playing;
                 // Reset exponential backoff only after sustained recovery.
@@ -169,9 +180,12 @@ impl Radio {
                 }
             },
         );
-        if status != self.status && c.is_connected() {
-            c.set_status_message(&status);
-            self.status = status;
+        if status != self.status && c.is_connected() && Instant::now() >= self.status_due {
+            self.status_command = c.set_status_message(&status).0;
+            if self.status_command > 0 {
+                self.status = status;
+            }
+            self.status_due = Instant::now() + Duration::from_secs(1);
         }
     }
     fn command(
@@ -219,30 +233,13 @@ impl Radio {
             }
             .into();
         }
-        let mut next = d.clone();
-        let restart = matches!(cmd, Command::Url(_) | Command::Stop | Command::Play);
-        match cmd {
-            Command::Url(u) => {
-                next.url = Some(u);
-                next.enabled = true
-            }
-            Command::Stop => next.enabled = false,
-            Command::Play => {
-                if next.url.is_none() {
-                    return "No saved URL; use u URL first".into();
+        match d.apply(&cmd, &cfg.state_file) {
+            Ok(restart) => {
+                if restart {
+                    self.reset(c);
                 }
-                next.enabled = true
             }
-            Command::Volume(v) => next.volume = v,
-            _ => unreachable!(),
-        }
-        if next.save(&cfg.state_file).is_err() {
-            tracing::error!("Could not persist requested state");
-            return "State could not be saved; command was not applied".into();
-        }
-        *d = next;
-        if restart {
-            self.reset(c);
+            Err(error) => return error.to_string(),
         }
         "Saved and applied".into()
     }
@@ -287,6 +284,10 @@ async fn main() -> Result<()> {
     let cfg = Config::load(&args[1])?;
     let mut desired = Desired::load(&cfg.state_file, cfg.default_volume)?;
     teamtalk::init_with_path(&cfg.sdk_library).context("load configured TeamTalk SDK library")?;
+    if let (Some(name), Some(key)) = (&cfg.license_name, &cfg.license_key) {
+        teamtalk::set_license(name, key)
+            .map_err(|_| anyhow::anyhow!("SDK license setup failed"))?;
+    }
     let c = Client::new()?;
     tls(&c, &cfg)?;
     ensure!(
@@ -307,6 +308,7 @@ async fn main() -> Result<()> {
     let mut connection_deadline: Option<Instant> = None;
     let mut connection_backoff = 1;
     let mut channel = ChannelId(0);
+    let mut multipart = std::collections::HashSet::new();
     loop {
         tokio::select! {_=term.recv()=>break,_=&mut interrupt=>break,_=tick.tick()=>{}}
         let now = Instant::now();
@@ -376,9 +378,19 @@ async fn main() -> Result<()> {
                     ready = false;
                     radio.reset(&c);
                     let _ = c.disconnect();
+                    multipart.clear();
                     connection_deadline = None;
                     connect_at = now + Duration::from_secs(connection_backoff);
                     connection_backoff = (connection_backoff * 2).min(cfg.max_backoff_seconds);
+                }
+                Event::CmdError => {
+                    if msg.source() == radio.status_command {
+                        radio.status.clear();
+                        radio.status_due = now + Duration::from_secs(5);
+                        tracing::warn!(
+                            "TeamTalk rejected status update; check account permissions/flood limits"
+                        );
+                    }
                 }
                 Event::AudioInput => {
                     if let Some(p) = msg.audio_input_progress() {
@@ -389,12 +401,15 @@ async fn main() -> Result<()> {
                     if let Some(m) = msg.text() {
                         use teamtalk_sys::TextMsgType;
                         let accepted = m.msg_type == TextMsgType::MSGTYPE_USER
-                            && m.to_id == c.my_id()
                             || cfg.channel_commands
                                 && m.msg_type == TextMsgType::MSGTYPE_CHANNEL
                                 && m.channel_id == c.my_channel_id();
                         if accepted && m.from_id != c.my_id() {
-                            let reply = if m.more || m.text.len() > 8192 {
+                            let continuation = multipart.remove(&m.from_id);
+                            if m.more {
+                                multipart.insert(m.from_id);
+                            }
+                            let reply = if continuation || m.more || m.text.len() > 8192 {
                                 "Send each command as one short message".into()
                             } else {
                                 let sender = c.get_user(m.from_id);
@@ -406,7 +421,7 @@ async fn main() -> Result<()> {
                                     sender.as_ref().map(|u| u.username.as_str()),
                                 )
                             };
-                            c.send_to_user(m.from_id, &reply);
+                            let _ = c.send_to_user(m.from_id, &reply);
                         }
                     }
                 }
