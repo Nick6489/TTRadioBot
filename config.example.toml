@@ -17,6 +17,8 @@ sdk_library = "/home/YOU/.local/lib/teamtalk/libTeamTalk5.so"
 username = "radio"
 password = "replace-me"
 nickname = "Radio"
+# Display the neutral/no-gender icon instead of the default male icon.
+no_gender = true
 channel = "/Radio"
 channel_password = ""
 controllers = ["your-authenticated-account"]

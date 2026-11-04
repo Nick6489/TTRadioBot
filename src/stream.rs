@@ -109,6 +109,7 @@ async fn run(
     title: watch::Sender<String>,
 ) -> Result<()> {
     let client = reqwest::Client::builder()
+        .user_agent(concat!("TTRadioBot/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::limited(5))
         .connect_timeout(timeout)
         .build()?;
@@ -284,6 +285,12 @@ mod pipeline_tests {
                     .to_ascii_lowercase()
                     .contains("icy-metadata: 1")
             );
+            assert!(String::from_utf8_lossy(&request).lines().any(|line| {
+                line.eq_ignore_ascii_case(concat!(
+                    "User-Agent: TTRadioBot/",
+                    env!("CARGO_PKG_VERSION")
+                ))
+            }));
             write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nicy-name: {station}\r\nConnection: close\r\n\r\n").unwrap();
             if stall {
                 let _ = socket.read(&mut one);

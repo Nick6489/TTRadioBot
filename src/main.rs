@@ -30,6 +30,7 @@ struct Radio {
     title: String,
     status: String,
     status_command: i32,
+    home_request: Option<(i32, teamtalk::types::UserId, Instant)>,
     status_due: Instant,
 }
 impl Radio {
@@ -48,6 +49,7 @@ impl Radio {
             title: String::new(),
             status: String::new(),
             status_command: 0,
+            home_request: None,
             status_due: Instant::now(),
         }
     }
@@ -187,7 +189,13 @@ impl Radio {
             },
         );
         if status != self.status && c.is_connected() && Instant::now() >= self.status_due {
-            self.status_command = c.set_status_message(&status).0;
+            self.status_command = if cfg.no_gender {
+                let mut mode = c.get_user(c.my_id()).map(|u| u.status).unwrap_or_default();
+                mode.gender = teamtalk::types::UserGender::Neutral;
+                c.set_status(mode, &status).0
+            } else {
+                c.set_status_message(&status).0
+            };
             if self.status_command > 0 {
                 self.status = status;
             }
@@ -201,6 +209,7 @@ impl Radio {
         d: &mut Desired,
         text: &str,
         account: Option<&str>,
+        requester: teamtalk::types::UserId,
     ) -> String {
         let cmd = match command::parse(text) {
             Ok(c) => c,
@@ -231,13 +240,23 @@ impl Radio {
             return "Not authorized: your authenticated account must be allowlisted".into();
         }
         if matches!(cmd, Command::Home) {
-            let id = c.join_channel_path(&cfg.channel, &cfg.channel_password);
-            return if id.0 > 0 {
-                "Home channel join requested"
-            } else {
-                "Home channel join could not be requested"
+            let home = c.get_channel_id_from_path(&cfg.channel);
+            if home.0 <= 0 {
+                return "Home channel not found: check the configured channel path and visibility"
+                    .into();
             }
-            .into();
+            if c.my_channel_id() == home {
+                return "Already in the home channel".into();
+            }
+            if self.home_request.is_some() {
+                return "A home channel join is already in progress".into();
+            }
+            let id = c.join_channel(home, &cfg.channel_password);
+            if id.0 <= 0 {
+                return "Cannot join home right now: the bot is not logged in or another channel join is in progress".into();
+            }
+            self.home_request = Some((id.0, requester, Instant::now()));
+            return "Joining the home channel; I will report the result".into();
         }
         match d.apply(&cmd, &cfg.state_file) {
             Ok(restart) => {
@@ -264,7 +283,14 @@ fn tls(c: &Client, cfg: &Config) -> Result<()> {
             );
         }
         ensure!(ca.len() < 512, "CA filename exceeds SDK limit");
-        let ctx = EncryptionContext::new("", "", ca, "", !cfg.insecure_tls, false, 8);
+        // The native SDK calls ACE set_verify_peer whenever depth >= 0,
+        // even when bVerifyPeer is false. Skip both CA loading and that call
+        // for the explicitly configured insecure mode.
+        let ctx = if cfg.insecure_tls {
+            EncryptionContext::new("", "", "", "", false, false, -1)
+        } else {
+            EncryptionContext::new("", "", ca, "", true, false, 8)
+        };
         ensure!(
             c.set_encryption_context(&ctx),
             "SDK refused TLS configuration"
@@ -316,11 +342,22 @@ async fn main() -> Result<()> {
     let mut connect_at = Instant::now();
     let mut connection_deadline: Option<Instant> = None;
     let mut connection_backoff = 1;
+    let mut address_attempt: usize = 0;
     let mut channel = ChannelId(0);
     let mut multipart = std::collections::HashSet::new();
     loop {
         tokio::select! {_=term.recv()=>break,_=&mut interrupt=>break,_=tick.tick()=>{}}
         let now = Instant::now();
+        if radio.home_request.as_ref().is_some_and(|(_, _, started)| {
+            now.duration_since(*started) >= Duration::from_secs(cfg.timeout_seconds)
+        }) {
+            if let Some((_, user, _)) = radio.home_request.take() {
+                let _ = c.send_to_user(
+                    user,
+                    "Home channel join timed out; no confirmation received from the server",
+                );
+            }
+        }
         if connection_deadline.is_some_and(|t| now >= t) {
             tracing::warn!("TeamTalk synchronization timed out");
             let _ = c.disconnect();
@@ -335,8 +372,33 @@ async fn main() -> Result<()> {
             login = 0;
             join = 0;
             ready = false;
-            if c.connect(&cfg.host, cfg.tcp_port, cfg.udp_port, cfg.tls)
-                .is_ok()
+            let address = match tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::net::lookup_host((cfg.host.as_str(), cfg.tcp_port as u16)),
+            )
+            .await
+            {
+                Ok(Ok(addresses)) => {
+                    let mut ips: Vec<_> = addresses.map(|a| a.ip()).collect();
+                    ips.sort_by_key(|ip| (ip.is_ipv6(), *ip));
+                    ips.dedup();
+                    if ips.is_empty() {
+                        None
+                    } else {
+                        let ip = ips[address_attempt % ips.len()];
+                        address_attempt = address_attempt.wrapping_add(1);
+                        tracing::info!(address = %ip, "Selected TeamTalk server address");
+                        Some(ip.to_string())
+                    }
+                }
+                _ => {
+                    tracing::warn!("TeamTalk DNS lookup failed or timed out");
+                    None
+                }
+            };
+            if address
+                .as_deref()
+                .is_some_and(|host| c.connect(host, cfg.tcp_port, cfg.udp_port, cfg.tls).is_ok())
             {
                 connection_deadline = Some(now + Duration::from_secs(cfg.timeout_seconds));
             } else {
@@ -357,6 +419,26 @@ async fn main() -> Result<()> {
                         .0;
                     connection_deadline = Some(now + Duration::from_secs(cfg.timeout_seconds));
                 }
+                Event::CmdSuccess | Event::CmdError
+                    if radio
+                        .home_request
+                        .as_ref()
+                        .is_some_and(|(id, _, _)| *id == msg.source()) =>
+                {
+                    let (_, user, _) = radio.home_request.take().unwrap();
+                    let reply = if matches!(event, Event::CmdSuccess) {
+                        "Returned to the home channel".to_string()
+                    } else if let Some(error) = msg.error_message() {
+                        format!(
+                            "Home channel join failed ({}): {}",
+                            error.code, error.message
+                        )
+                    } else {
+                        "Home channel join rejected by the server without an error description"
+                            .into()
+                    };
+                    let _ = c.send_to_user(user, &reply);
+                }
                 Event::CmdSuccess if msg.source() == login => {
                     join = c.join_channel_path(&cfg.channel, &cfg.channel_password).0;
                     connection_deadline = Some(now + Duration::from_secs(cfg.timeout_seconds));
@@ -365,6 +447,7 @@ async fn main() -> Result<()> {
                     ready = true;
                     connection_deadline = None;
                     connection_backoff = 1;
+                    address_attempt = 0;
                     channel = c.my_channel_id();
                     radio.status.clear();
                     tracing::info!("Channel membership synchronized");
@@ -383,7 +466,19 @@ async fn main() -> Result<()> {
                 | Event::ConnectCryptError
                 | Event::MySelfLoggedOut
                 | Event::MySelfKicked => {
-                    tracing::warn!("TeamTalk disconnected or kicked; retry scheduled");
+                    let sdk_error = msg.error_message();
+                    tracing::warn!(
+                        event = ?event,
+                        sdk_error_code = ?sdk_error.as_ref().map(|e| e.code),
+                        sdk_error_message = ?sdk_error.as_ref().map(|e| e.message.as_str()),
+                        "TeamTalk connection ended; retry scheduled"
+                    );
+                    if let Some((_, user, _)) = radio.home_request.take() {
+                        let _ = c.send_to_user(
+                            user,
+                            "Home channel join interrupted: the bot lost its server session",
+                        );
+                    }
                     ready = false;
                     radio.reset(&c);
                     let _ = c.disconnect();
@@ -428,6 +523,7 @@ async fn main() -> Result<()> {
                                     &mut desired,
                                     &m.text,
                                     sender.as_ref().map(|u| u.username.as_str()),
+                                    m.from_id,
                                 )
                             };
                             let _ = c.send_to_user(m.from_id, &reply);

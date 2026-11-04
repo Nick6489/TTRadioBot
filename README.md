@@ -2,7 +2,8 @@
 
 A small Linux Rust bot that relays a live HTTP/HTTPS MP3 stream into TeamTalk.
 Symphonia decodes MP3 to interleaved signed 16-bit PCM; volume is applied before
-`TT_InsertAudioBlock`. No playback subprocess, sound device, audio server,
+`TT_InsertAudioBlock`. Stream requests identify the bot with
+`User-Agent: TTRadioBot/<version>`. No playback subprocess, sound device, audio server,
 loopback, or local media library is used.
 
 ## Build and SDK installation
@@ -37,7 +38,9 @@ install -m600 config.example.toml ~/.config/ttradiobot/config.toml
 ~/.local/bin/ttradiobot ~/.config/ttradiobot/config.toml
 ```
 
-Configuration is TOML with unknown fields rejected. TLS/plain mode is explicit.
+Configuration is TOML with unknown fields rejected. Set `no_gender = true` to
+display the neutral/no-gender icon; omission preserves the existing gender.
+ TLS/plain mode is explicit.
 `insecure_tls = true` disables TeamTalk certificate verification only when
 explicitly requested; HTTP HTTPS verification remains enabled. Read the
 [SDK TLS caveat](docs/sdk.md#tls) before choosing trusted CAs.
@@ -62,7 +65,7 @@ Send private TeamTalk text messages to the bot:
 | `p` | Enable the saved URL; error if none exists |
 | `v NUMBER` | Save volume 0–100; 100 is unity gain, 0 silence |
 | `i` | URL host, title, volume, desired setting, actual state |
-| `h` | Request a return to the configured home channel |
+| `h` | Return home; report already home, success, or the server error |
 | `?` | Command help |
 
 Only exact authenticated usernames in `controllers` can control the bot,

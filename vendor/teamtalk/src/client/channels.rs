@@ -6,7 +6,7 @@ use crate::types::{Channel, ChannelId, CommandId, UserId};
 use std::time::{Duration, Instant};
 
 fn can_start_join(state: ConnectionState) -> bool {
-    matches!(state, ConnectionState::LoggedIn)
+    matches!(state, ConnectionState::LoggedIn | ConnectionState::Joined(_))
 }
 
 fn can_leave_channel_in_state(state: ConnectionState) -> bool {

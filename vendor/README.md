@@ -6,6 +6,10 @@ and license are included; upstream tests/examples are not needed to build it.
 
 Local changes:
 
+- src/client/channels.rs: allow joining from Joined as well as LoggedIn so
+  channel changes (including returning home after an administrator move) reach
+  the native SDK. Concurrent joins remain blocked.
+
 - Cargo.toml: spell out optional teamtalk-macros version instead of inheriting a
   workspace dependency outside this repository.
 - src/lib.rs: a process-local OnceLock records successful SDK loading. `init()`

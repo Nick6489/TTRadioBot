@@ -17,6 +17,8 @@ pub struct Config {
     pub username: String,
     pub password: String,
     pub nickname: String,
+    #[serde(default)]
+    pub no_gender: bool,
     pub channel: String,
     #[serde(default)]
     pub channel_password: String,

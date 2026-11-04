@@ -123,6 +123,7 @@ sdk_library = {library:?}
 username = "radio"
 password = "test"
 nickname = "Radio test"
+no_gender = true
 channel = "/"
 controllers = ["controller"]
 grace_seconds = 1
@@ -144,6 +145,39 @@ state_file = {state:?}
             .any(|u| u.username == "radio" && u.channel_id.0 > 0)
     });
     let mut bot = c.get_user_by_username("radio").unwrap().id;
+    until(&c, || {
+        c.get_user(bot)
+            .is_some_and(|u| u.status.gender == teamtalk::types::UserGender::Neutral)
+    });
+    assert_eq!(request(&c, bot, "h"), "Already in the home channel");
+    // Reproduce an administrator moving the bot away from its home channel.
+    let mut away = c.get_channel(ChannelId(1)).unwrap();
+    away.id = ChannelId(0);
+    away.parent_id = ChannelId(1);
+    away.name = "Away".into();
+    assert!(c.make_channel(&away).0 > 0);
+    until(&c, || c.get_channel_id_from_path("/Away/").0 > 0);
+    let away_id = c.get_channel_id_from_path("/Away/");
+    assert!(c.move_user(bot, away_id).0 > 0);
+    until(&c, || {
+        c.get_user(bot).is_some_and(|u| u.channel_id == away_id)
+    });
+    assert_eq!(
+        request(&c, bot, "h"),
+        "Joining the home channel; I will report the result"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "No home join result");
+        if let Some((Event::TextMessage, message)) = c.poll(20)
+            && let Some(text) = message.text()
+            && text.from_id == bot
+        {
+            assert_eq!(text.text, "Returned to the home channel");
+            break;
+        }
+    }
+    assert_eq!(c.get_user(bot).unwrap().channel_id, ChannelId(1));
     let http = Http::new();
     assert_eq!(
         request(&c, bot, &format!("u {}/a", http.url)),
