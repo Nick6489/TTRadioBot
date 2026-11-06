@@ -1,5 +1,4 @@
-//! Consumption accounting uses the SDK resampler's rounded output frame count,
-//! avoiding drift when (for example) 44.1 kHz MP3 is injected into a 48 kHz channel.
+//! Consumption accounting counts actual frames after application resampling.
 use teamtalk::types::AudioCodec;
 
 // Allow short network and scheduler delays without starving the SDK input.
@@ -20,29 +19,12 @@ fn speex_rate(band: i32) -> Option<u32> {
         _ => None,
     }
 }
-pub fn output_frames(input_frames: usize, input_rate: u32, output_rate: u32) -> u64 {
-    let n = input_frames as u64 * u64::from(output_rate);
-    (n + u64::from(input_rate) / 2) / u64::from(input_rate)
-}
 pub fn needs_audio(submitted: u64, elapsed_ms: u32, rate: u32) -> bool {
     (submitted * 1000 / u64::from(rate)).saturating_sub(u64::from(elapsed_ms)) < TARGET_BUFFER_MS
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn resampling_has_no_long_run_drift() {
-        assert_eq!(output_frames(1152, 44100, 48000), 1254);
-        let mut submitted = 0;
-        for _ in 0..1_000_000 {
-            submitted += output_frames(1152, 44100, 48000);
-        }
-        let elapsed = (submitted * 1000 / 48000) as u32;
-        assert!(needs_audio(submitted, elapsed, 48000));
-        assert!(!needs_audio(submitted + 14400, elapsed, 48000));
-        assert_eq!(output_frames(1152, 48000, 48000), 1152);
-    }
-
     #[test]
     fn replenishes_below_three_hundred_ms() {
         for rate in [8000, 16000, 32000, 48000] {

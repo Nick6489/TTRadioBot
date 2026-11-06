@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+rubato = { version = "0.16.2", default-features = false }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"

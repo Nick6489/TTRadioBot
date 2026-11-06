@@ -24,17 +24,20 @@ injection. PCM is native-endian signed 16-bit, interleaved for stereo, with
 channel layouts are rejected. `uSampleIndex` is ignored. `nStreamID` identifies
 the injection session and progress events. AudioInputStreamer copies submitted
 frames synchronously into message blocks; the caller may release PCM after the
-call returns. It resamples and converts channels to the channel codec format,
-and rejects an input format change within the same session. The bot starts a
-new session on format changes. `queue.rs` mirrors native CalcSamples rounding,
-so duration credits remain aligned over long sessions.
+call returns. The application resamples to the channel codec's sample rate
+before injection, using a persistent Rubato windowed-sinc converter. Input is
+reblocked into 1024-frame chunks, retaining incomplete chunks without padding.
+Filter history and fractional sample position persist across decoder frames.
+Equal-rate input bypasses conversion. The SDK may still convert mono/stereo
+channel layout. Source format or channel sample-rate changes start a new
+injection session and converter; stop/switch discards buffered filter history.
 
 The SDK queue is finite and insertion can fail. The bot normally keeps about
-300 ms plus one MP3 frame outstanding, tracking cumulative submitted duration
-against `AudioInputProgress.elapsed_ms`, accounting for each frame
-rounded into the channel sample rate exactly as the native resampler does. It replenishes using consumption events,
-not wall-clock audio pacing. Failure preserves one pending PCM frame and waits
-for consumption; a stalled-input deadline reconnects instead of looping forever.
+300 ms plus one converted block outstanding. Queue accounting counts the actual
+converted frames against `AudioInputProgress.elapsed_ms`, with no per-MP3-frame
+rounding. Failed insertion preserves the converted, unscaled block for retry,
+so retries neither advance the converter nor apply volume twice. A stalled-input
+deadline reconnects instead of looping forever.
 Compressed input is bounded to two 1024-byte chunks, with sixteen decoded frames
 plus one pending frame; Symphonia and the HTTP client also have finite internal
 buffers. An output/backpressure timeout prevents prolonged stale connections.

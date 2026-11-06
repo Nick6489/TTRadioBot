@@ -3,6 +3,7 @@ mod config;
 mod icy;
 mod native;
 mod queue;
+mod resample;
 mod state;
 mod stream;
 
@@ -23,7 +24,8 @@ struct Radio {
     submitted_samples: u64,
     elapsed_ms: u32,
     last_progress: Instant,
-    format: Option<(u32, usize)>,
+    format: Option<(u32, usize, u32)>,
+    converter: Option<resample::Converter>,
     retry_at: Instant,
     backoff: u64,
     actual: Actual,
@@ -43,6 +45,7 @@ impl Radio {
             elapsed_ms: 0,
             last_progress: Instant::now(),
             format: None,
+            converter: None,
             retry_at: Instant::now(),
             backoff: 1,
             actual: Actual::Stopped,
@@ -72,6 +75,7 @@ impl Radio {
         self.submitted_samples = 0;
         self.elapsed_ms = 0;
         self.format = None;
+        self.converter = None;
         self.title.clear();
         self.status_due = Instant::now();
         ended
@@ -125,8 +129,8 @@ impl Radio {
                 tracing::warn!("Audio input stalled; restarting at live position");
                 self.fail(c, cfg.max_backoff_seconds);
             }
-            // Target 300 ms submitted but not consumed, plus at most one decoder
-            // frame. Consumption events replenish this budget.
+            // Keep about 300 ms submitted but not consumed. Consumption events,
+            // rather than wall-clock sleeps, replenish this budget.
             let output_rate = c
                 .my_channel()
                 .and_then(|ch| queue::output_rate(&ch.audio_codec));
@@ -135,22 +139,55 @@ impl Radio {
                     queue::needs_audio(self.submitted_samples, self.elapsed_ms, rate)
                 })
             {
-                let pcm = self
-                    .pending
-                    .take()
-                    .or_else(|| self.worker.as_mut().and_then(|w| w.pcm.try_recv().ok()));
-                let Some(mut pcm) = pcm else {
-                    break;
+                let rate = output_rate.unwrap();
+                // Pending frames are already converted; retry them without touching
+                // resampler state. Drop them if the channel rate has changed.
+                let pcm = if let Some(pcm) = self.pending.take().filter(|p| p.rate == rate) {
+                    pcm
+                } else {
+                    let Some(pcm) = self.worker.as_mut().and_then(|w| w.pcm.try_recv().ok()) else {
+                        break;
+                    };
+                    let fmt = (pcm.rate, pcm.channels, rate);
+                    if self.format.is_some_and(|f| f != fmt) {
+                        self.next_id();
+                        native::end(c, self.id);
+                        self.next_id();
+                        self.submitted_samples = 0;
+                        self.elapsed_ms = 0;
+                        self.converter = None;
+                    }
+                    self.format = Some(fmt);
+                    if self.converter.is_none() {
+                        match resample::Converter::new(pcm.rate, rate, pcm.channels) {
+                            Ok(converter) => {
+                                tracing::info!(
+                                    input_rate = pcm.rate,
+                                    output_rate = rate,
+                                    channels = pcm.channels,
+                                    "Configured continuous audio resampling"
+                                );
+                                self.converter = Some(converter);
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "Cannot configure resampler");
+                                self.fail(c, cfg.max_backoff_seconds);
+                                break;
+                            }
+                        }
+                    }
+                    match self.converter.as_mut().unwrap().process(pcm) {
+                        Ok(pcm) => pcm,
+                        Err(error) => {
+                            tracing::warn!(%error, "Audio resampling failed");
+                            self.fail(c, cfg.max_backoff_seconds);
+                            break;
+                        }
+                    }
                 };
-                let fmt = (pcm.rate, pcm.channels);
-                if self.format.is_some_and(|f| f != fmt) {
-                    self.next_id();
-                    native::end(c, self.id);
-                    self.next_id();
-                    self.submitted_samples = 0;
-                    self.elapsed_ms = 0;
+                if pcm.samples.is_empty() {
+                    continue;
                 }
-                self.format = Some(fmt);
                 // Gain is applied only when submitting, so queued decoder frames use current volume.
                 let mut scaled = stream::Pcm {
                     samples: pcm.samples.clone(),
@@ -162,12 +199,7 @@ impl Radio {
                     self.pending = Some(pcm);
                     break;
                 }
-                self.submitted_samples += queue::output_frames(
-                    pcm.samples.len() / pcm.channels,
-                    pcm.rate,
-                    output_rate.unwrap(),
-                );
-                pcm.samples.clear();
+                self.submitted_samples += (pcm.samples.len() / pcm.channels) as u64;
                 self.actual = Actual::Playing;
                 // Reset exponential backoff only after sustained recovery.
                 if self.elapsed_ms > 10_000 {
@@ -350,13 +382,12 @@ async fn main() -> Result<()> {
         let now = Instant::now();
         if radio.home_request.as_ref().is_some_and(|(_, _, started)| {
             now.duration_since(*started) >= Duration::from_secs(cfg.timeout_seconds)
-        }) {
-            if let Some((_, user, _)) = radio.home_request.take() {
-                let _ = c.send_to_user(
-                    user,
-                    "Home channel join timed out; no confirmation received from the server",
-                );
-            }
+        }) && let Some((_, user, _)) = radio.home_request.take()
+        {
+            let _ = c.send_to_user(
+                user,
+                "Home channel join timed out; no confirmation received from the server",
+            );
         }
         if connection_deadline.is_some_and(|t| now >= t) {
             tracing::warn!("TeamTalk synchronization timed out");

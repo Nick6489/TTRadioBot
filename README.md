@@ -105,7 +105,7 @@ updates are deduplicated and limited to 511 UTF-8 bytes without splitting a
 character. Metadata is interpreted as UTF-8 with replacement for invalid bytes.
 
 Volume changes use the current setting when submitting PCM, without reopening
-the stream. A small amount already submitted (about 300 ms plus a decoder frame
+the stream. A small amount already submitted (about 300 ms plus a converted block
 and channel codec buffering) retains the previous gain. No amplification or
 speech processing is enabled. TeamTalk account permissions, channel codec,
 channel transmission policy, and server flood limits still apply.
