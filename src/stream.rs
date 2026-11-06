@@ -37,7 +37,9 @@ pub struct Worker {
 }
 impl Worker {
     pub fn start(url: String, timeout: Duration) -> Self {
-        let (tx, pcm) = mpsc::channel(4);
+        // ~418 ms of 1152-sample MP3 frames at 44.1 kHz, bounded so a brief
+        // source delay can be absorbed without accumulating stale radio audio.
+        let (tx, pcm) = mpsc::channel(16);
         let (title_tx, title) = watch::channel(String::new());
         let (cancel, cancel_rx) = watch::channel(false);
         let (done_tx, done) = watch::channel(false);

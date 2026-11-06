@@ -125,8 +125,8 @@ impl Radio {
                 tracing::warn!("Audio input stalled; restarting at live position");
                 self.fail(c, cfg.max_backoff_seconds);
             }
-            // Keep at most ~150 ms submitted but not consumed. Consumption events,
-            // rather than wall-clock sleeps, replenish this budget.
+            // Target 300 ms submitted but not consumed, plus at most one decoder
+            // frame. Consumption events replenish this budget.
             let output_rate = c
                 .my_channel()
                 .and_then(|ch| queue::output_rate(&ch.audio_codec));

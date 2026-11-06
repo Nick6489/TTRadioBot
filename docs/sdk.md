@@ -30,12 +30,12 @@ new session on format changes. `queue.rs` mirrors native CalcSamples rounding,
 so duration credits remain aligned over long sessions.
 
 The SDK queue is finite and insertion can fail. The bot normally keeps about
-100 ms plus one MP3 frame outstanding, tracking cumulative submitted duration
+300 ms plus one MP3 frame outstanding, tracking cumulative submitted duration
 against `AudioInputProgress.elapsed_ms`, accounting for each frame
 rounded into the channel sample rate exactly as the native resampler does. It replenishes using consumption events,
 not wall-clock audio pacing. Failure preserves one pending PCM frame and waits
 for consumption; a stalled-input deadline reconnects instead of looping forever.
-Compressed input is bounded to two 1024-byte chunks, with four decoded frames
+Compressed input is bounded to two 1024-byte chunks, with sixteen decoded frames
 plus one pending frame; Symphonia and the HTTP client also have finite internal
 buffers. An output/backpressure timeout prevents prolonged stale connections.
 
