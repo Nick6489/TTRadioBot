@@ -77,6 +77,35 @@ chains), remote administration moves/kicks, long-duration playback, and native
 musl SDK runtime must also be checked on the deployment host. The container
 recipe is supplied but requires Podman/Docker to verify.
 
+## Headless ALSA launcher and remote builds
+
+The production VM uses a shell launcher at `~/.local/bin/ttradiobot` that sets
+`ALSA_CONFIG_PATH` before executing `~/.local/bin/ttradiobot.bin`. The standalone
+ALSA configuration supplies null devices for native SDK discovery without probing
+absent hardware or PulseAudio. Radio PCM is still injected directly into TeamTalk.
+The `.bin` suffix distinguishes the compiled executable from the launcher.
+
+Install the repository templates and compiled executable as the deployment user:
+
+```sh
+install -d "$HOME/.local/bin" "$HOME/.config/ttradiobot"
+install -m 644 systemd/alsa.conf "$HOME/.config/ttradiobot/alsa.conf"
+install -m 755 systemd/ttradiobot-wrapper.sh "$HOME/.local/bin/ttradiobot"
+install -m 755 target/release/ttradiobot "$HOME/.local/bin/ttradiobot.bin"
+```
+
+The existing systemd unit launches the wrapper. On subsequent deployments,
+replace the `.bin` executable, retain the wrapper and ALSA configuration, and
+restart the service. An explicitly set `ALSA_CONFIG_PATH` overrides the default.
+
+For a jumpbox workflow, develop and commit here, transfer a source snapshot to
+a separate build directory on the VM, and build with `cargo build --release --locked`.
+Keep the running installation separate from the build tree. Building on the VM
+requires access to dependencies or a prepopulated Cargo cache/vendor directory.
+Alternatively, transfer a binary built against a compatible target architecture
+and glibc version; the production TeamTalk SDK and its native dependencies must
+also be compatible. Keep credentials and runtime state outside source snapshots.
+
 ## Manual playback, recovery, and occupancy checks
 
 1. On an isolated Linux host, verify `pgrep -x pulseaudio` and

@@ -14,8 +14,14 @@ Build dependencies generate bindings; the native SDK is loaded at runtime.
 
 ```
 cargo build --release --locked
-install -Dm755 target/release/ttradiobot ~/.local/bin/ttradiobot
+install -Dm755 target/release/ttradiobot ~/.local/bin/ttradiobot.bin
+install -Dm755 systemd/ttradiobot-wrapper.sh ~/.local/bin/ttradiobot
+install -Dm644 systemd/alsa.conf ~/.config/ttradiobot/alsa.conf
 ```
+
+The launcher sets a headless ALSA configuration before starting the `.bin`
+executable. For upgrades, replace `ttradiobot.bin` and retain the launcher. See
+[remote build and deployment details](docs/validation.md#headless-alsa-launcher-and-remote-builds).
 
 Download and extract the [TeamTalk SDK](https://bearware.dk/?page_id=419) for your
 architecture. Install its `Library/TeamTalk_DLL/libTeamTalk5.so` under
