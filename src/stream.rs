@@ -37,9 +37,9 @@ pub struct Worker {
 }
 impl Worker {
     pub fn start(url: String, timeout: Duration) -> Self {
-        // ~418 ms of 1152-sample MP3 frames at 44.1 kHz, bounded so a brief
-        // source delay can be absorbed without accumulating stale radio audio.
-        let (tx, pcm) = mpsc::channel(16);
+        // Decoder blocks are split to <=20 ms: at most 200 ms in this channel.
+        // The playback loop collects its separate duration-bounded reserve.
+        let (tx, pcm) = mpsc::channel(10);
         let (title_tx, title) = watch::channel(String::new());
         let (cancel, cancel_rx) = watch::channel(false);
         let (done_tx, done) = watch::channel(false);
@@ -218,15 +218,18 @@ fn decode(source: Source, tx: mpsc::Sender<Pcm>) -> Result<()> {
         ensure!(audio.capacity() <= 16384, "oversized audio frame");
         let mut samples = SampleBuffer::<i16>::new(audio.capacity() as u64, spec);
         samples.copy_interleaved_ref(audio);
-        if tx
-            .blocking_send(Pcm {
-                samples: samples.samples().to_vec(),
-                rate: spec.rate,
-                channels,
-            })
-            .is_err()
-        {
-            return Ok(());
+        let block_samples = (spec.rate as usize / 50).max(1) * channels;
+        for block in samples.samples().chunks(block_samples) {
+            if tx
+                .blocking_send(Pcm {
+                    samples: block.to_vec(),
+                    rate: spec.rate,
+                    channels,
+                })
+                .is_err()
+            {
+                return Ok(());
+            }
         }
     }
 }

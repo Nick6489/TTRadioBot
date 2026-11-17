@@ -106,6 +106,22 @@ Alternatively, transfer a binary built against a compatible target architecture
 and glibc version; the production TeamTalk SDK and its native dependencies must
 also be compatible. Keep credentials and runtime state outside source snapshots.
 
+## Buffering validation
+
+The offline reserve tests cover a 260 ms delivery pause at 8, 44.1 and 48 kHz,
+one-second startup gating, repeated underruns raising refills to two then three
+seconds, and the three-second reserve limit. Progress tests verify that a zero
+SDK output queue with submitted audio still outstanding does not trigger a
+refill, and that stale session events are ignored. These checks do not establish
+continuous received audio through the native SDK.
+
+For a native playback check, use an isolated radio fixture paced at its encoded
+bitrate. Let playback establish, stop sending for 250 ms, then deliver the
+withheld bytes and resume normal pacing. The receiver should hear continuous
+audio without an underrun log. A pause long enough to exhaust the reserve should
+log one underrun and resume only after the larger refill; repeat to verify the
+three-second cap. Stop or switch while refilling to verify old audio is discarded.
+
 ## Manual playback, recovery, and occupancy checks
 
 1. On an isolated Linux host, verify `pgrep -x pulseaudio` and

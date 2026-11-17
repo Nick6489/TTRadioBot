@@ -20,6 +20,8 @@ use teamtalk::{
 struct Radio {
     worker: Option<stream::Worker>,
     pending: Option<stream::Pcm>,
+    reserve: queue::Reserve,
+    insertion_rejected: bool,
     id: i32,
     submitted_samples: u64,
     elapsed_ms: u32,
@@ -40,6 +42,8 @@ impl Radio {
         Self {
             worker: None,
             pending: None,
+            reserve: queue::Reserve::default(),
+            insertion_rejected: false,
             id: 1,
             submitted_samples: 0,
             elapsed_ms: 0,
@@ -64,6 +68,8 @@ impl Radio {
             w.stop();
         }
         self.pending = None;
+        self.reserve = queue::Reserve::default();
+        self.insertion_rejected = false;
         let ended = if self.format.is_some() && c.my_channel_id().0 > 0 {
             self.next_id();
             native::end(c, self.id);
@@ -95,6 +101,17 @@ impl Radio {
         if p.stream_id == self.id {
             self.elapsed_ms = p.elapsed_ms;
             self.last_progress = Instant::now();
+            // queue_ms excludes the SDK's input/resampling queue. A zero there
+            // alone is normal: require all submitted audio to be consumed too.
+            if p.queue_ms == 0
+                && p.elapsed_ms > 0
+                && self.format.is_some_and(|(_, _, rate)| {
+                    queue::queued_ms(self.submitted_samples, p.elapsed_ms, rate) == 0
+                })
+                && self.reserve.underrun()
+            {
+                self.actual = Actual::Connecting;
+            }
         }
     }
     fn tick(&mut self, c: &Client, cfg: &Config, d: &Desired, want: bool) {
@@ -124,10 +141,25 @@ impl Radio {
                 self.title = w.title.borrow().clone();
             }
             if self.worker.is_some()
+                && self.format.is_some()
+                && !self.reserve.is_buffering()
                 && self.last_progress.elapsed() > Duration::from_secs(cfg.timeout_seconds)
             {
                 tracing::warn!("Audio input stalled; restarting at live position");
                 self.fail(c, cfg.max_backoff_seconds);
+            }
+            if let Some(w) = &mut self.worker {
+                while !self.reserve.full() {
+                    let Ok(pcm) = w.pcm.try_recv() else {
+                        break;
+                    };
+                    self.reserve.push(pcm);
+                }
+            }
+            let was_buffering = self.reserve.is_buffering();
+            let reserve_ready = self.reserve.ready();
+            if reserve_ready && was_buffering {
+                self.last_progress = Instant::now();
             }
             // Keep about 300 ms submitted but not consumed. Consumption events,
             // rather than wall-clock sleeps, replenish this budget.
@@ -135,6 +167,7 @@ impl Radio {
                 .my_channel()
                 .and_then(|ch| queue::output_rate(&ch.audio_codec));
             while self.worker.is_some()
+                && reserve_ready
                 && output_rate.is_some_and(|rate| {
                     queue::needs_audio(self.submitted_samples, self.elapsed_ms, rate)
                 })
@@ -145,7 +178,7 @@ impl Radio {
                 let pcm = if let Some(pcm) = self.pending.take().filter(|p| p.rate == rate) {
                     pcm
                 } else {
-                    let Some(pcm) = self.worker.as_mut().and_then(|w| w.pcm.try_recv().ok()) else {
+                    let Some(pcm) = self.reserve.pop() else {
                         break;
                     };
                     let fmt = (pcm.rate, pcm.channels, rate);
@@ -196,9 +229,17 @@ impl Radio {
                 };
                 stream::gain(&mut scaled.samples, d.volume);
                 if !native::insert(c, &scaled, self.id) {
+                    if !self.insertion_rejected {
+                        tracing::warn!(
+                            reserve_ms = self.reserve.ms(),
+                            "TeamTalk audio insertion rejected; retrying"
+                        );
+                    }
+                    self.insertion_rejected = true;
                     self.pending = Some(pcm);
                     break;
                 }
+                self.insertion_rejected = false;
                 self.submitted_samples += (pcm.samples.len() / pcm.channels) as u64;
                 self.actual = Actual::Playing;
                 // Reset exponential backoff only after sustained recovery.
@@ -606,4 +647,47 @@ async fn main() -> Result<()> {
     }
     let _ = c.disconnect();
     Ok(())
+}
+
+#[cfg(test)]
+mod buffering_tests {
+    use super::*;
+    #[test]
+    fn progress_ignores_staged_audio_and_old_sessions() {
+        let mut radio = Radio::new();
+        radio.format = Some((48000, 2, 48000));
+        radio.submitted_samples = 48000;
+        radio.actual = Actual::Playing;
+        for _ in 0..50 {
+            radio.reserve.push(stream::Pcm {
+                samples: vec![0; 960 * 2],
+                rate: 48000,
+                channels: 2,
+            });
+        }
+        assert!(radio.reserve.ready());
+        let mut p = teamtalk::types::AudioInputProgress::default();
+        p.stream_id = radio.id;
+        p.elapsed_ms = 20;
+        radio.progress(p);
+        assert!(
+            !radio.reserve.is_buffering(),
+            "SDK still holds 980 ms of submitted audio"
+        );
+        p.stream_id += 1;
+        p.elapsed_ms = 1000;
+        radio.progress(p);
+        assert!(
+            !radio.reserve.is_buffering(),
+            "old session cannot trigger refill"
+        );
+        p.stream_id = radio.id;
+        radio.progress(p);
+        assert!(radio.reserve.is_buffering());
+        assert_eq!(radio.actual, Actual::Connecting);
+        assert!(
+            !radio.reserve.ready(),
+            "one second is insufficient after underrun"
+        );
+    }
 }

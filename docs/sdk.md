@@ -38,9 +38,21 @@ converted frames against `AudioInputProgress.elapsed_ms`, with no per-MP3-frame
 rounding. Failed insertion preserves the converted, unscaled block for retry,
 so retries neither advance the converter nor apply volume twice. A stalled-input
 deadline reconnects instead of looping forever.
-Compressed input is bounded to two 1024-byte chunks, with sixteen decoded frames
-plus one pending frame; Symphonia and the HTTP client also have finite internal
-buffers. An output/backpressure timeout prevents prolonged stale connections.
+Playback waits for one second of decoded audio before the first submission.
+A zero-length SDK queue after all submitted audio is consumed triggers a refill, increasing
+that threshold to two seconds, then three seconds on further underruns. The
+threshold resets on stop/switch/reconnect. The continuous converter survives a
+refill, preserving its filter history. This adds roughly one second of startup
+latency in exchange for protection against short delivery pauses.
+
+The application collects up to three seconds of decoded PCM (plus at most one
+20 ms block). Decoder output is split into blocks of at most 20 ms with a
+10-block channel (at most 200 ms), independent of MP3 frame duration. One
+converted pending block is retained when SDK insertion fails. Compressed input
+is bounded to two 1024-byte chunks; Symphonia and the HTTP client also have
+finite internal buffers. An output/backpressure timeout prevents prolonged
+stale connections. Reserve readiness, SDK queue underruns, and insertion
+rejection episodes are logged without stream URLs.
 
 **NULL does not clear the queue.** SDK `QueueAudioInput` calls `Flush`, appending
 an end marker. A different nonzero stream ID destroys the old input streamer,
